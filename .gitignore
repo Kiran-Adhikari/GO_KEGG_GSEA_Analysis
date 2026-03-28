@@ -47,3 +47,13 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# Git-related files (optional/temporary)
+.gitattributes
+.gitkeep
+*.gitkeep
+.git/config.local
+.git/index.lock
+.git/HEAD.lock
+*.txt
+blog_images/

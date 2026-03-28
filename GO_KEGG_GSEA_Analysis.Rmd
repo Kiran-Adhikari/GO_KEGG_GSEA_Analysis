@@ -1,0 +1,1036 @@
+---
+title: "GO, KEGG, and GSEA Enrichment Analysis Workflow"
+author: "Kiran Adhikari"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    number_sections: true
+    fig_caption: true
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width = 10, fig.height = 6)
+setwd("/Users/kiranadhikari/Downloads/Development/My-Github/GO_KEGG_GSEA_Analysis")
+
+# Setup TinyTeX path for macOS
+if (Sys.info()["sysname"] == "Darwin") {
+  tinytex_path <- file.path(Sys.getenv("HOME"), "Library", "TinyTeX", "bin", "universal-darwin")
+  if (dir.exists(tinytex_path)) {
+    Sys.setenv(PATH = paste(tinytex_path, Sys.getenv("PATH"), sep = ":"))
+  }
+}
+
+# Ensure tinytex is available
+if (!requireNamespace("tinytex", quietly = TRUE)) {
+  install.packages("tinytex")
+}
+library(tinytex)
+```
+
+# Overview
+
+**What is this?** This is a complete, step-by-step guide to analyze your RNA-seq data using three different enrichment methods: GO, KEGG, and GSEA. Each method helps you understand which biological pathways or functions are important in your experiment.
+
+## Assumptions
+
+-   You already ran DESeq2 (or similar)
+-   You have a results table with gene-level statistics
+
+## Input Requirements
+
+Your DE results must contain:
+
+| Column           | Description                   |
+|------------------|-------------------------------|
+| `gene`           | Gene symbol (recommended)     |
+| `log2FoldChange` | Effect size                   |
+| `padj`           | Adjusted p-value              |
+| `stat`           | Wald / t statistic (for GSEA) |
+
+Example: `res_df`
+
+# Package Installation and Loading
+
+**What is this?** We need to install and load R packages (tools) that help us do the enrichment analysis. These packages contain functions to connect genes to biological pathways.
+
+```{r, echo=FALSE}
+# Install packages if needed (run once)
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install(c(
+  "clusterProfiler",
+  "org.Hs.eg.db",
+  "enrichplot",
+  "fgsea"
+))
+```
+
+Load Library
+
+```{r packages}
+# Load required libraries
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(patchwork)
+```
+
+# Data Loading
+
+**What is this?** We read your differential expression results file. This file contains information about which genes changed between your experimental groups (like control vs treatment).
+
+### Read the DE results
+
+```{r data-loading}
+# Load DE results from file
+# Update the path to your specific comparison
+data_path <- "RNAseq-test-VS-Control-all-ge-difference.txt"
+
+# Read the DE results
+res_df <- read.delim(data_path, sep = "\t", stringsAsFactors = FALSE)
+
+# Check data structure
+head(res_df)
+str(res_df)
+```
+
+# Data Preparation
+
+**What is this?** We clean up the data by removing genes that have missing or invalid statistics. This ensures our analysis only uses reliable data.
+
+```{r data-prep}
+# Remove NA statistics
+res_df <- res_df %>%
+  filter(!is.na(stat), !is.na(gene))
+
+# Check number of genes
+cat("Total genes:", nrow(res_df), "\n")
+cat("Genes with valid statistics:", nrow(res_df), "\n")
+```
+
+# Analysis 1: GO Enrichment
+
+**What is this?** GO (Gene Ontology) enrichment finds which biological processes, molecular functions, or cellular components are over-represented in your list of significantly changed genes. It only looks at genes that passed your significance thresholds.
+
+**DEG-based Over-Representation Analysis**
+
+## Select DEGs
+
+```{r go-deg-selection}
+# Select DEGs
+deg_genes <- res_df %>%
+  filter(padj < 0.05, abs(log2FoldChange) > 1) %>%
+  pull(gene)
+```
+
+## Run GO Enrichment
+
+```{r go-enrichment}
+ego <- enrichGO(
+  gene          = deg_genes,
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "BP",        # BP / MF / CC
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+# View results
+head(ego@result)
+```
+
+## GO Enrichment Results Table
+
+**What is this?** This table shows all the GO terms that are over-represented in your significantly changed genes. Each row is a biological process, function, or component that your genes are involved in.
+
+```{r go-results-table}
+# Format GO enrichment results table
+if(nrow(ego@result) > 0) {
+  go_table <- ego@result %>%
+    select(ID, Description, Count, GeneRatio, BgRatio, pvalue, p.adjust, qvalue) %>%
+    mutate(
+      `p-value` = formatC(pvalue, format = "e", digits = 2),
+      `p-adjust` = formatC(p.adjust, format = "e", digits = 2),
+      `q-value` = formatC(qvalue, format = "e", digits = 2)
+    ) %>%
+    rename(
+      `Gene Count` = Count,
+      `Gene Ratio` = GeneRatio,
+      `Background Ratio` = BgRatio
+    ) %>%
+    select(ID, Description, `Gene Count`, `Gene Ratio`, `Background Ratio`, `p-value`, `p-adjust`, `q-value`)
+  
+  knitr::kable(head(go_table), 
+                caption = "GO Enrichment Results",
+                digits = 6)
+}
+```
+
+## Plot GO Results
+
+```{r go-plot}
+dotplot(ego, showCategory = 10)
+```
+
+# Analysis 2: KEGG Enrichment
+
+**What is this?** KEGG enrichment finds which biological pathways (like "Cell cycle" or "Immune response") are over-represented in your significantly changed genes. It uses the KEGG pathway database which contains well-studied biological pathways.
+
+**DEG-based Pathway Analysis**
+
+## Convert SYMBOL to ENTREZ
+
+```{r kegg-conversion}
+# Convert SYMBOL → ENTREZ
+deg_entrez <- bitr(
+  deg_genes,
+  fromType = "SYMBOL",
+  toType   = "ENTREZID",
+  OrgDb    = org.Hs.eg.db
+)
+```
+
+## Run KEGG Enrichment
+
+```{r kegg-enrichment}
+ekk <- enrichKEGG(
+  gene          = deg_entrez$ENTREZID,
+  organism      = "hsa",
+  pvalueCutoff  = 0.05
+)
+
+# View results
+head(ekk@result)
+```
+
+## KEGG Enrichment Results Table
+
+**What is this?** This table shows all the KEGG pathways that are over-represented in your significantly changed genes. Each row is a biological pathway that your genes belong to.
+
+```{r kegg-results-table}
+# Format KEGG enrichment results table
+if(nrow(ekk@result) > 0) {
+  kegg_table <- ekk@result %>%
+    select(ID, Description, Count, GeneRatio, BgRatio, pvalue, p.adjust, qvalue) %>%
+    mutate(
+      `p-value` = formatC(pvalue, format = "e", digits = 2),
+      `p-adjust` = formatC(p.adjust, format = "e", digits = 2),
+      `q-value` = formatC(qvalue, format = "e", digits = 2)
+    ) %>%
+    rename(
+      `Gene Count` = Count,
+      `Gene Ratio` = GeneRatio,
+      `Background Ratio` = BgRatio
+    ) %>%
+    select(ID, Description, `Gene Count`, `Gene Ratio`, `Background Ratio`, `p-value`, `p-adjust`, `q-value`)
+  
+  knitr::kable(head(kegg_table), 
+                caption = "KEGG Enrichment Results",
+                digits = 6)
+}
+```
+
+## Plot KEGG Results
+
+```{r kegg-plot}
+dotplot(ekk, showCategory = 10)
+```
+
+# Analysis 3: GSEA
+
+**What is this?** GSEA (Gene Set Enrichment Analysis) is different from GO and KEGG. Instead of only looking at significantly changed genes, it uses ALL your genes ranked by how much they changed. This helps find pathways that might be important but don't show up in the other methods.
+
+**Rank-based, NO DEG filtering**
+
+## Create Ranked Gene List
+
+```{r gsea-ranking}
+# Create ranked gene list (ALL genes)
+gene_rank <- res_df$stat
+names(gene_rank) <- res_df$gene
+
+gene_rank <- sort(gene_rank, decreasing = TRUE)
+```
+
+> **⚠️ Important:** Do NOT filter by padj or logFC for GSEA
+
+## GSEA with GO (rank-based)
+
+```{r gsea-go}
+gsea_go <- gseGO(
+  geneList     = gene_rank,
+  OrgDb        = org.Hs.eg.db,
+  keyType      = "SYMBOL",
+  ont          = "BP",
+  minGSSize    = 10,
+  maxGSSize    = 500,
+  pvalueCutoff = 0.25,   # GSEA standard
+  verbose      = FALSE
+)
+
+# View results
+head(gsea_go@result)
+```
+
+## GSEA-GO Results Table
+
+**What is this?** This table shows all the GO terms that were enriched in your data. The columns tell you how significant each result is and how strong the enrichment is.
+
+```{r gsea-go-table}
+# Format GSEA-GO results table
+if(nrow(gsea_go@result) > 0) {
+  # Check available columns and use the correct column names
+  available_cols <- colnames(gsea_go@result)
+  
+  # Create table with available columns
+  gsea_go_table <- gsea_go@result %>%
+    select(ID, Description, setSize)
+  
+  # Add ES column (might be enrichmentScore in some versions)
+  if("enrichmentScore" %in% available_cols) {
+    gsea_go_table$ES <- gsea_go@result$enrichmentScore
+  } else if("ES" %in% available_cols) {
+    gsea_go_table$ES <- gsea_go@result$ES
+  }
+  
+  # Add other columns if they exist
+  if("NES" %in% available_cols) {
+    gsea_go_table$NES <- gsea_go@result$NES
+  }
+  if("pvalue" %in% available_cols) {
+    gsea_go_table$`p-value` <- gsea_go@result$pvalue
+  }
+  if("p.adjust" %in% available_cols) {
+    gsea_go_table$`p-adjust` <- gsea_go@result$p.adjust
+  }
+  if("qvalue" %in% available_cols) {
+    gsea_go_table$`q-value` <- gsea_go@result$qvalue
+  }
+  
+  # Format the table
+  gsea_go_table <- gsea_go_table %>%
+    mutate(
+      `Set size` = setSize
+    )
+  
+  # Round numeric columns
+  if("ES" %in% colnames(gsea_go_table)) {
+    gsea_go_table$ES <- round(gsea_go_table$ES, 6)
+  }
+  if("NES" %in% colnames(gsea_go_table)) {
+    gsea_go_table$NES <- round(gsea_go_table$NES, 6)
+  }
+  if("p-value" %in% colnames(gsea_go_table)) {
+    gsea_go_table$`p-value` <- formatC(gsea_go_table$`p-value`, format = "e", digits = 2)
+  }
+  if("p-adjust" %in% colnames(gsea_go_table)) {
+    gsea_go_table$`p-adjust` <- formatC(gsea_go_table$`p-adjust`, format = "e", digits = 2)
+  }
+  if("q-value" %in% colnames(gsea_go_table)) {
+    gsea_go_table$`q-value` <- formatC(gsea_go_table$`q-value`, format = "e", digits = 2)
+  }
+  
+  # Select final columns
+  final_cols <- c("ID", "Description", "Set size")
+  if("ES" %in% colnames(gsea_go_table)) final_cols <- c(final_cols, "ES")
+  if("NES" %in% colnames(gsea_go_table)) final_cols <- c(final_cols, "NES")
+  if("p-value" %in% colnames(gsea_go_table)) final_cols <- c(final_cols, "p-value")
+  if("p-adjust" %in% colnames(gsea_go_table)) final_cols <- c(final_cols, "p-adjust")
+  if("q-value" %in% colnames(gsea_go_table)) final_cols <- c(final_cols, "q-value")
+  
+  gsea_go_table <- gsea_go_table %>% select(all_of(final_cols))
+  
+  knitr::kable(gsea_go_table, 
+                caption = "GSEA-GO Enrichment Results",
+                digits = 6)
+}
+```
+
+Plot gsea_go results
+
+```{r}
+dotplot(gsea_go, showCategory = 10)
+```
+
+## GSEA with KEGG (rank-based)
+
+```{r gsea-kegg-conversion}
+# Convert ALL genes to ENTREZ
+rank_entrez <- bitr(
+  names(gene_rank),
+  fromType = "SYMBOL",
+  toType   = "ENTREZID",
+  OrgDb    = org.Hs.eg.db
+)
+
+gene_rank_kegg <- gene_rank[rank_entrez$SYMBOL]
+names(gene_rank_kegg) <- rank_entrez$ENTREZID
+gene_rank_kegg <- sort(gene_rank_kegg, decreasing = TRUE)
+```
+
+```{r gsea-kegg}
+gsea_kegg <- gseKEGG(
+  geneList     = gene_rank_kegg,
+  organism     = "hsa",
+  pvalueCutoff = 0.25,
+  verbose      = FALSE
+)
+
+# View results
+head(gsea_kegg@result)
+```
+
+Plot gsea_kegg results
+
+```{r}
+dotplot(gsea_kegg, showCategory = 10)
+```
+
+## Plot GSEA Results
+
+For GO
+
+```{r gsea-plot-single}
+# Single pathway plot
+gseaplot2(
+  gsea_go,
+  geneSetID = gsea_go@result$ID[3],
+  title     = gsea_go@result$Description[3]
+)
+```
+
+For kegg
+
+```{r gsea_kegg-plot-single}
+# Single pathway plot
+gseaplot2(
+  gsea_kegg,
+  geneSetID = gsea_kegg@result$ID[2],
+  title     = gsea_kegg@result$Description[2]
+)
+```
+
+## Extract Leading-Edge Genes
+
+**What is this?** Leading-edge genes are the key genes that drive the enrichment signal. These are the most important genes in each pathway that contribute to the enrichment result.
+
+```{r leading-edge}
+# Extract leading-edge genes (core drivers)
+leading_edge_genes <- gsea_go@result %>%
+  select(ID, Description, leading_edge)
+
+head(leading_edge_genes)
+```
+
+# Side-by-Side Comparison: GO vs KEGG vs GSEA
+
+**What is this?** This section helps you understand how the three methods compare. You'll see which pathways each method found, how they overlap, and which method works best for your data.
+
+## Prepare Comparison Data
+
+**What is this?** We organize all the results from the three methods into one table so we can compare them side-by-side.
+
+```{r comparison-prep, echo=FALSE}
+# Create summary dataframes for comparison
+go_summary <- ego@result %>%
+  mutate(Method = "GO ORA", 
+         Pathway = Description,
+         Pvalue = pvalue,
+         Padj = p.adjust,
+         GeneCount = Count,
+         EnrichmentScore = NA) %>%
+  select(Method, Pathway, Pvalue, Padj, GeneCount, EnrichmentScore) %>%
+  head(20)
+
+kegg_summary <- ekk@result %>%
+  mutate(Method = "KEGG ORA",
+         Pathway = Description,
+         Pvalue = pvalue,
+         Padj = p.adjust,
+         GeneCount = Count,
+         EnrichmentScore = NA) %>%
+  select(Method, Pathway, Pvalue, Padj, GeneCount, EnrichmentScore) %>%
+  head(20)
+
+gsea_go_summary <- gsea_go@result %>%
+  mutate(Method = "GSEA-GO",
+         Pathway = Description,
+         Pvalue = pvalue,
+         Padj = p.adjust,
+         GeneCount = setSize,
+         EnrichmentScore = NES) %>%
+  select(Method, Pathway, Pvalue, Padj, GeneCount, EnrichmentScore) %>%
+  head(20)
+
+gsea_kegg_summary <- gsea_kegg@result %>%
+  mutate(Method = "GSEA-KEGG",
+         Pathway = Description,
+         Pvalue = pvalue,
+         Padj = p.adjust,
+         GeneCount = setSize,
+         EnrichmentScore = NES) %>%
+  select(Method, Pathway, Pvalue, Padj, GeneCount, EnrichmentScore) %>%
+  head(20)
+
+# Combine all results
+comparison_df <- bind_rows(
+  go_summary,
+  kegg_summary,
+  gsea_go_summary,
+  gsea_kegg_summary
+) %>%
+  mutate(
+    log10Padj = -log10(Padj),
+    Method = factor(Method, levels = c("GO ORA", "KEGG ORA", "GSEA-GO", "GSEA-KEGG"))
+  )
+```
+
+## Comparison Table
+
+**What is this?** This table summarizes the overall statistics for each method, showing how many pathways were found and how significant they are.
+
+```{r comparison-table}
+# Create a summary table
+comparison_table <- comparison_df %>%
+  group_by(Method) %>%
+  summarise(
+    `Total Pathways` = n(),
+    `Min P-adj` = min(Padj, na.rm = TRUE),
+    `Max P-adj` = max(Padj, na.rm = TRUE),
+    `Mean Gene Count` = round(mean(GeneCount, na.rm = TRUE), 1),
+    `Mean Enrichment Score` = ifelse(Method %in% c("GSEA-GO", "GSEA-KEGG"), 
+                                     round(mean(EnrichmentScore, na.rm = TRUE), 2), 
+                                     NA)
+  )
+
+knitr::kable(head(comparison_table), caption = "Summary Statistics by Method")
+```
+
+## Comparison Visualizations
+
+**What is this?** These plots help you visually compare the results from different methods. You can see which method finds more significant pathways and how the results differ.
+
+### 1. P-value Distribution Comparison
+
+**What is this?** This plot shows how significant the pathways are for each method. Higher values mean more significant results.
+
+Direct comparison of enrichment strategies revealed that DEG-based ORA and rank-based GSEA capture fundamentally different regulatory signals. While GO and KEGG ORA detected only a limited number of moderately significant terms, GSEA identified robust and highly significant enrichment across both ontologies and pathways. This discrepancy reflects a transcriptional landscape characterized by widespread, coordinated modulation of gene sets rather than isolated, high-magnitude gene expression changes. Consequently, GSEA provides a more sensitive and biologically informative representation of the underlying regulatory programs active in this condition.
+
+```{r comparison-pvalue}
+p1 <- ggplot(comparison_df, aes(x = Method, y = log10Padj, fill = Method)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.3, size = 0.5) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    title = "P-value Distribution Comparison",
+    x = "Method",
+    y = "-log10(Adjusted P-value)"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+print(p1)
+```
+
+### 3. Gene Count Comparison
+
+**What is this?** This plot shows how many genes are in each enriched pathway. Some pathways are large (many genes), others are small (few genes).
+
+```{r comparison-gene-count}
+p3 <- ggplot(comparison_df, aes(x = Method, y = GeneCount, fill = Method)) +
+  geom_violin(alpha = 0.7) +
+  geom_boxplot(width = 0.1, alpha = 0.5) +
+  scale_fill_brewer(palette = "Set2") +
+  scale_y_log10() +
+  labs(
+    title = "Gene Count Distribution by Method",
+    x = "Method",
+    y = "Gene Count (log10 scale)"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+print(p3)
+```
+
+#### Plot Interpretation
+
+This violin plot reveals fundamental differences in the scale of gene sets identified by each method:
+
+**ORA Methods (GO ORA and KEGG ORA):** - **GO ORA**: Median gene count \~9-10 genes per term - Distribution is relatively narrow and centered - Most GO terms contain 5-20 genes - Represents focused, specific biological processes
+
+-   **KEGG ORA**: Median gene count \~5-6 genes per pathway
+    -   Lowest gene counts among all methods
+    -   Distribution is skewed toward smaller pathways
+    -   Represents highly specific pathway components
+
+**GSEA Methods (GSEA-GO and GSEA-KEGG):** - **GSEA-GO**: Median gene count \~100 genes per term - 10-20x larger than ORA methods - Wide distribution (50-180 genes typical range) - Captures broader biological processes with many coordinated genes
+
+-   **GSEA-KEGG**: Median gene count \~110-120 genes per pathway
+    -   Similar scale to GSEA-GO
+    -   Very wide distribution with some pathways containing 200-300 genes
+    -   Represents comprehensive pathway-level changes
+
+#### Key Insights
+
+1.  **Scale Difference**: GSEA methods identify pathways with 10-20x more genes than ORA methods. This reflects that GSEA captures coordinated changes across large gene sets, while ORA focuses on smaller, more specific functional units.
+
+2.  **Biological Interpretation**:
+
+    -   **ORA methods** are better for identifying specific, focused biological functions (e.g., "DNA repair" with 5-10 key genes)
+    -   **GSEA methods** are better for identifying broad regulatory programs (e.g., "Cell cycle" with 100+ coordinated genes)
+
+3.  **Method Selection**:
+
+    -   Use **ORA** when you want to find specific genes or small functional modules
+    -   Use **GSEA** when you want to detect subtle but coordinated changes across large gene networks
+
+4.  **Complementary Information**: The methods provide complementary views - ORA finds the "needles" (specific changes), while GSEA finds the "haystack" (coordinated programs).
+
+## Key Differences Summary
+
+**What is this?** This section explains the main differences between the methods in simple terms, helping you understand when to use each one.
+
+```{r key-differences}
+cat("=== KEY DIFFERENCES ===\n\n")
+cat("1. GO ORA (Over-Representation Analysis):\n")
+cat("   - Uses DEGs only (padj < 0.05, |log2FC| > 1)\n")
+cat("   - Tests if DEGs are over-represented in GO terms\n")
+cat("   - Total significant pathways:", nrow(ego@result), "\n\n")
+
+cat("2. KEGG ORA:\n")
+cat("   - Uses DEGs only (same as GO)\n")
+cat("   - Tests if DEGs are over-represented in KEGG pathways\n")
+cat("   - Total significant pathways:", nrow(ekk@result), "\n\n")
+
+cat("3. GSEA-GO:\n")
+cat("   - Uses ALL genes (ranked by statistic)\n")
+cat("   - Tests if genes at extremes of ranked list are enriched\n")
+cat("   - Provides NES (Normalized Enrichment Score)\n")
+cat("   - Total significant pathways:", nrow(gsea_go@result), "\n\n")
+
+cat("4. GSEA-KEGG:\n")
+cat("   - Uses ALL genes (ranked by statistic)\n")
+cat("   - Tests KEGG pathways using GSEA approach\n")
+cat("   - Provides NES (Normalized Enrichment Score)\n")
+cat("   - Total significant pathways:", nrow(gsea_kegg@result), "\n")
+```
+
+# Summary
+
+**What is this?** This final table summarizes the key characteristics of each method, helping you choose which method to use for your analysis.
+
+| Analysis  | Separate? | Input        | Uses DEGs? | Provides NES? |
+|-----------|-----------|--------------|------------|---------------|
+| GO ORA    | ✅        | DEG list     | ✅         | ❌            |
+| KEGG ORA  | ✅        | DEG list     | ✅         | ❌            |
+| GSEA-GO   | ✅        | Ranked genes | ❌         | ✅            |
+| GSEA-KEGG | ✅        | Ranked genes | ❌         | ✅            |
+
+**Key Point:** GO, KEGG, and GSEA are three separate enrichment analyses, each implemented independently with its own input representation and statistical framework. ORA methods (GO and KEGG) focus on DEGs, while GSEA methods use the full ranked gene list and provide enrichment scores.
+
+# Blog Visualizations
+
+**What is this?** This section generates high-quality visualizations saved as PNG files that you can use in your blog post. All plots are saved with publication-quality settings.
+
+## Create Output Directory
+
+```{r blog-viz-setup}
+# Create directory for blog images
+blog_dir <- "blog_images"
+if (!dir.exists(blog_dir)) {
+  dir.create(blog_dir)
+}
+cat("Blog images will be saved to:", blog_dir, "\n")
+```
+
+## 1. Save P-value Distribution Plot
+
+```{r save-pvalue-plot}
+# Save p-value comparison plot
+ggsave(
+  filename = file.path(blog_dir, "pvalue-distribution-comparison.png"),
+  plot = p1,
+  width = 10,
+  height = 6,
+  dpi = 300,
+  bg = "white"
+)
+cat("Saved: pvalue-distribution-comparison.png\n")
+```
+
+## 2. Save Gene Count Comparison Plot
+
+```{r save-gene-count-plot}
+# Save gene count comparison plot
+ggsave(
+  filename = file.path(blog_dir, "gene-count-comparison.png"),
+  plot = p3,
+  width = 10,
+  height = 6,
+  dpi = 300,
+  bg = "white"
+)
+cat("Saved: gene-count-comparison.png\n")
+```
+
+## 3. Save GO Enrichment Dot Plot
+
+```{r save-go-dotplot}
+# Save GO dot plot
+if(nrow(ego@result) > 0) {
+  go_dot <- dotplot(ego, showCategory = 15) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+      axis.text.y = element_text(size = 9)
+    )
+  
+  ggsave(
+    filename = file.path(blog_dir, "go-enrichment-dotplot.png"),
+    plot = go_dot,
+    width = 12,
+    height = 8,
+    dpi = 300,
+    bg = "white"
+  )
+  cat("Saved: go-enrichment-dotplot.png\n")
+}
+```
+
+## 4. Save KEGG Enrichment Dot Plot
+
+```{r save-kegg-dotplot}
+# Save KEGG dot plot
+if(nrow(ekk@result) > 0) {
+  kegg_dot <- dotplot(ekk, showCategory = 15) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+      axis.text.y = element_text(size = 9)
+    )
+  
+  ggsave(
+    filename = file.path(blog_dir, "kegg-enrichment-dotplot.png"),
+    plot = kegg_dot,
+    width = 12,
+    height = 8,
+    dpi = 300,
+    bg = "white"
+  )
+  cat("Saved: kegg-enrichment-dotplot.png\n")
+}
+```
+
+## 5. Save GSEA-GO Dot Plot
+
+```{r save-gsea-go-dotplot}
+# Save GSEA-GO dot plot
+if(nrow(gsea_go@result) > 0) {
+  gsea_go_dot <- dotplot(gsea_go, showCategory = 15) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+      axis.text.y = element_text(size = 9)
+    )
+  
+  ggsave(
+    filename = file.path(blog_dir, "gsea-go-dotplot.png"),
+    plot = gsea_go_dot,
+    width = 12,
+    height = 8,
+    dpi = 300,
+    bg = "white"
+  )
+  cat("Saved: gsea-go-dotplot.png\n")
+}
+```
+
+## 6. Save GSEA-KEGG Dot Plot
+
+```{r save-gsea-kegg-dotplot}
+# Save GSEA-KEGG dot plot
+if(nrow(gsea_kegg@result) > 0) {
+  gsea_kegg_dot <- dotplot(gsea_kegg, showCategory = 15) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+      axis.text.y = element_text(size = 9)
+    )
+  
+  ggsave(
+    filename = file.path(blog_dir, "gsea-kegg-dotplot.png"),
+    plot = gsea_kegg_dot,
+    width = 12,
+    height = 8,
+    dpi = 300,
+    bg = "white"
+  )
+  cat("Saved: gsea-kegg-dotplot.png\n")
+}
+```
+
+## 7. Save Top GSEA Enrichment Plot (GO)
+
+```{r save-gsea-go-enrichment}
+# Save top GSEA-GO enrichment plot
+if(nrow(gsea_go@result) > 0) {
+  # Get top enriched pathway
+  top_pathway_id <- gsea_go@result$ID[1]
+  top_pathway_desc <- gsea_go@result$Description[1]
+  
+  gsea_plot_go <- gseaplot2(
+    gsea_go,
+    geneSetID = top_pathway_id,
+    title = top_pathway_desc,
+    pvalue_table = TRUE
+  )
+  
+  # Save as PNG
+  png(
+    filename = file.path(blog_dir, "gsea-go-top-pathway.png"),
+    width = 12,
+    height = 8,
+    units = "in",
+    res = 300,
+    bg = "white"
+  )
+  print(gsea_plot_go)
+  dev.off()
+  cat("Saved: gsea-go-top-pathway.png\n")
+}
+```
+
+## 8. Save Top GSEA Enrichment Plot (KEGG)
+
+```{r save-gsea-kegg-enrichment}
+# Save top GSEA-KEGG enrichment plot
+if(nrow(gsea_kegg@result) > 0) {
+  # Get top enriched pathway
+  top_pathway_id <- gsea_kegg@result$ID[1]
+  top_pathway_desc <- gsea_kegg@result$Description[1]
+  
+  gsea_plot_kegg <- gseaplot2(
+    gsea_kegg,
+    geneSetID = top_pathway_id,
+    title = top_pathway_desc,
+    pvalue_table = TRUE
+  )
+  
+  # Save as PNG
+  png(
+    filename = file.path(blog_dir, "gsea-kegg-top-pathway.png"),
+    width = 12,
+    height = 8,
+    units = "in",
+    res = 300,
+    bg = "white"
+  )
+  print(gsea_plot_kegg)
+  dev.off()
+  cat("Saved: gsea-kegg-top-pathway.png\n")
+}
+```
+
+## 9. Create Combined Comparison Plot
+
+```{r save-combined-comparison}
+# Create a combined comparison plot
+if(exists("p1") && exists("p3")) {
+  # Combine p-value and gene count plots
+  combined_plot <- p1 / p3 + 
+    plot_annotation(
+      title = "Comprehensive Comparison: GO vs KEGG vs GSEA",
+      theme = theme(
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+        plot.margin = margin(20, 20, 20, 20)
+      )
+    )
+  
+  ggsave(
+    filename = file.path(blog_dir, "combined-comparison-plot.png"),
+    plot = combined_plot,
+    width = 12,
+    height = 12,
+    dpi = 300,
+    bg = "white"
+  )
+  cat("Saved: combined-comparison-plot.png\n")
+}
+```
+
+## 10. Create Method Comparison Summary Plot
+
+```{r save-method-summary}
+# Create a summary visualization showing key differences
+if(exists("comparison_df")) {
+  # Create a summary plot
+  summary_data <- comparison_df %>%
+    group_by(Method) %>%
+    summarise(
+      n_pathways = n(),
+      mean_gene_count = mean(GeneCount, na.rm = TRUE),
+      mean_log10padj = mean(log10Padj, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  # Create a bar plot for pathway counts
+  p_pathways <- ggplot(summary_data, aes(x = Method, y = n_pathways, fill = Method)) +
+    geom_bar(stat = "identity", alpha = 0.8) +
+    scale_fill_brewer(palette = "Set2") +
+    labs(
+      title = "Number of Enriched Pathways by Method",
+      x = "Method",
+      y = "Number of Pathways"
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      plot.title = element_text(hjust = 0.5, face = "bold")
+    )
+  
+  # Create a bar plot for mean gene count
+  p_mean_genes <- ggplot(summary_data, aes(x = Method, y = mean_gene_count, fill = Method)) +
+    geom_bar(stat = "identity", alpha = 0.8) +
+    scale_fill_brewer(palette = "Set2") +
+    scale_y_log10() +
+    labs(
+      title = "Mean Gene Count per Pathway",
+      x = "Method",
+      y = "Mean Gene Count (log10 scale)"
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      plot.title = element_text(hjust = 0.5, face = "bold")
+    )
+  
+  # Combine plots
+  summary_combined <- p_pathways | p_mean_genes
+  
+  ggsave(
+    filename = file.path(blog_dir, "method-summary-comparison.png"),
+    plot = summary_combined,
+    width = 14,
+    height = 6,
+    dpi = 300,
+    bg = "white"
+  )
+  cat("Saved: method-summary-comparison.png\n")
+}
+```
+
+## 11. Create NES Distribution Plot (GSEA only)
+
+```{r save-nes-distribution}
+# Create NES distribution plot for GSEA methods
+if(exists("comparison_df")) {
+  gsea_only <- comparison_df %>%
+    filter(Method %in% c("GSEA-GO", "GSEA-KEGG")) %>%
+    filter(!is.na(EnrichmentScore))
+  
+  if(nrow(gsea_only) > 0) {
+    p_nes <- ggplot(gsea_only, aes(x = Method, y = EnrichmentScore, fill = Method)) +
+      geom_boxplot(alpha = 0.7) +
+      geom_jitter(width = 0.2, alpha = 0.3, size = 0.5) +
+      geom_hline(yintercept = 0, linetype = "dashed", color = "red", linewidth = 0.8) +
+      scale_fill_brewer(palette = "Set2") +
+      labs(
+        title = "Normalized Enrichment Score (NES) Distribution",
+        subtitle = "GSEA Methods Only - Positive = Activation, Negative = Suppression",
+        x = "Method",
+        y = "Normalized Enrichment Score (NES)"
+      ) +
+      theme_minimal() +
+      theme(
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5)
+      )
+    
+    ggsave(
+      filename = file.path(blog_dir, "nes-distribution-gsea.png"),
+      plot = p_nes,
+      width = 10,
+      height = 6,
+      dpi = 300,
+      bg = "white"
+    )
+    cat("Saved: nes-distribution-gsea.png\n")
+  }
+}
+```
+
+## 12. Create Top Pathways Bar Chart
+
+```{r save-top-pathways}
+# Create bar chart of top pathways from each method
+if(exists("comparison_df")) {
+  # Get top 5 pathways from each method
+  top_pathways <- comparison_df %>%
+    group_by(Method) %>%
+    top_n(5, wt = -Padj) %>%
+    ungroup() %>%
+    mutate(
+      Pathway_short = ifelse(nchar(Pathway) > 50, 
+                            paste0(substr(Pathway, 1, 47), "..."), 
+                            Pathway)
+    )
+  
+  p_top <- ggplot(top_pathways, 
+                  aes(x = reorder(Pathway_short, -log10Padj), 
+                      y = log10Padj, 
+                      fill = Method)) +
+    geom_bar(stat = "identity", alpha = 0.8) +
+    coord_flip() +
+    facet_wrap(~ Method, scales = "free_y", ncol = 2) +
+    scale_fill_brewer(palette = "Set2") +
+    labs(
+      title = "Top 5 Pathways by Method",
+      x = "Pathway",
+      y = "-log10(Adjusted P-value)"
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      axis.text.y = element_text(size = 8),
+      strip.text = element_text(face = "bold")
+    )
+  
+  ggsave(
+    filename = file.path(blog_dir, "top-pathways-by-method.png"),
+    plot = p_top,
+    width = 14,
+    height = 10,
+    dpi = 300,
+    bg = "white"
+  )
+  cat("Saved: top-pathways-by-method.png\n")
+}
+```
+
+## Summary of Saved Images
+
+```{r list-saved-images, echo=FALSE}
+# List all saved images
+if(dir.exists(blog_dir)) {
+  saved_images <- list.files(blog_dir, pattern = "\\.png$", full.names = FALSE)
+  cat("\n=== Saved Blog Images ===\n")
+  cat("Total images saved:", length(saved_images), "\n\n")
+  for(img in saved_images) {
+    cat("-", img, "\n")
+  }
+  cat("\nAll images saved to:", blog_dir, "\n")
+  cat("You can now use these images in your blog post!\n")
+}
+```
