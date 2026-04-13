@@ -3,12 +3,11 @@ title: "GO, KEGG, and GSEA Enrichment Analysis Workflow"
 author: "Kiran Adhikari"
 date: "`r Sys.Date()`"
 output:
-  pdf_document:
+  html_document:
     toc: true
     number_sections: true
     fig_caption: true
 ---
-
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width = 10, fig.height = 6)
@@ -347,7 +346,7 @@ if(nrow(gsea_go@result) > 0) {
   
   gsea_go_table <- gsea_go_table %>% select(all_of(final_cols))
   
-  knitr::kable(gsea_go_table, 
+  knitr::kable(head(gsea_go_table), 
                 caption = "GSEA-GO Enrichment Results",
                 digits = 6)
 }

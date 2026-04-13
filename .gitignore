@@ -57,3 +57,5 @@ rsconnect/
 .git/HEAD.lock
 *.txt
 blog_images/
+GO_KEGG_GSEA_Analysis.tex
+ GO_KEGG_GSEA_Analysis.log
